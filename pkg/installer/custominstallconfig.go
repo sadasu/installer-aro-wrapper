@@ -7,12 +7,16 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/url"
 	"path/filepath"
 
+	"github.com/coreos/ignition/v2/config/util"
 	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/ignition"
 	"github.com/openshift/installer/pkg/asset/ignition/bootstrap"
+	"github.com/openshift/installer/pkg/asset/ignition/machine"
 	"github.com/openshift/installer/pkg/asset/installconfig"
 	"github.com/openshift/installer/pkg/asset/releaseimage"
 	"github.com/openshift/installer/pkg/asset/targets"
@@ -112,6 +116,10 @@ func (m *manager) applyInstallConfigCustomisations(installConfig *installconfig.
 			return nil, err
 		}
 	}
+	// Update Master Pointer Ignition with ARO API-Int IP
+	if err = replacePointerIgnition(aroManifests, g, dnsConfig); err != nil {
+		return nil, err
+	}
 
 	return g, nil
 }
@@ -200,6 +208,31 @@ func appendFilesToCvoOverrides(a asset.WritableAsset, g graph.Graph) (err error)
 
 		bootstrap.Config.Storage.Files[i] = ignition.FileFromBytes(ignPath, "root", 0420, cvData)
 	}
+
+	return nil
+}
+
+// replacePointerIgnition performs the same functionality as the upstream
+// installer's pointerIgnitionConfig() but with ARO specific DNS config
+func replacePointerIgnition(a asset.WritableAsset, g graph.Graph, aroDNSConfig *bootkube.ARODNSConfig) (err error) {
+	masterPointerIgn := g.Get(&machine.Master{}).(*machine.Master)
+	ignitionHost := net.JoinHostPort(aroDNSConfig.APIIntIP, "22623")
+	role := "master"
+
+	masterPointerIgn.Config.Ignition.Config.Merge[0].Source = util.StrToPtr(func() *url.URL {
+		return &url.URL{
+			Scheme: "https",
+			Host:   ignitionHost,
+			Path:   fmt.Sprintf("/config/%s", role),
+		}
+	}().String())
+
+	data, err := ignition.Marshal(masterPointerIgn.Config)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal updated master pointer Ignition config")
+	}
+
+	masterPointerIgn.File.Data = data
 
 	return nil
 }
