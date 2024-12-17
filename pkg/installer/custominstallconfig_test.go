@@ -4,6 +4,7 @@ package installer
 // Licensed under the Apache License 2.0.
 
 import (
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	icazure "github.com/openshift/installer/pkg/asset/installconfig/azure"
 	"github.com/openshift/installer/pkg/asset/installconfig/azure/mock"
 	"github.com/openshift/installer/pkg/asset/releaseimage"
+	"github.com/openshift/installer/pkg/asset/tls"
 	"github.com/openshift/installer/pkg/ipnet"
 	"github.com/openshift/installer/pkg/types"
 	azuretypes "github.com/openshift/installer/pkg/types/azure"
@@ -316,6 +318,7 @@ func TestApplyInstallConfigCustomisations(t *testing.T) {
 
 	masterAsset := graph.Get(&machine.Master{}).(*machine.Master)
 	verifyMasterPointerIgnition(t, masterAsset.File.Data)
+	verifyUpdateMCSCertKey(t, bootstrapAsset)
 }
 
 func verifyIgnitionFiles(t *testing.T, temp map[string]any, storageFiles []string, systemdFiles []string, fileName string) {
@@ -381,4 +384,44 @@ func verifyMasterPointerIgnition(t *testing.T, ignData []byte) {
 
 	actualSource := *ignContents.Ignition.Config.Merge[0].Source
 	assert.EqualValues(t, expectedMasterIgnitionSource, actualSource, fmt.Sprintf("expected master pointer ignition to be %s but found %s", expectedMasterIgnitionSource, actualSource))
+}
+
+func verifyUpdateMCSCertKey(t *testing.T, bootstrap *bootstrap.Bootstrap) {
+	config := &igntypes.Config{}
+	config = bootstrap.Config
+
+	cert := &x509.Certificate{}
+	var data []byte
+
+	for i, fileData := range config.Storage.Files {
+		if fileData.Path == mcsCertFile {
+			contents := config.Storage.Files[i].Contents.Source
+			replaceable := "data:text/plain;charset=utf-8;base64,"
+			replaced := strings.Replace(*contents, replaceable, "", 1)
+
+			decodedCert, err := base64.StdEncoding.DecodeString(replaced)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = yaml.Unmarshal(decodedCert, &data)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cert, err = tls.PemToCertificate(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(data) {
+		t.Error("failed to append certs from PEM")
+	}
+	opts := x509.VerifyOptions{
+		Roots:   certPool,
+		DNSName: apiIntIP,
+	}
+	_, err := cert.Verify(opts)
+	assert.NoError(t, err, "verifyUpdateMCSCertKey")
 }
